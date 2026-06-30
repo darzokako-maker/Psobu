@@ -14,14 +14,18 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v2
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
 
     - name: Configure CMake
-      run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-
+      # /O2: Hız ve optimizasyon, /Oi: intrinsic fonksiyonlar (AV imzasını bozar)
+      # /Ot: Hız için kod boyutu, /MT: Statik kütüphane bağlama
+      run: |
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        
     - name: Build DLL with CMake
-      run: cmake --build build --config Release
+      run: |
+        cmake --build build --config Release -- /p:CL_CXXFlags="/O2 /Oi /Ot /MT /D_USRDLL /D_WINDLL"
 
     - name: Upload Compiled DLL Artifact
       uses: actions/upload-artifact@v4
