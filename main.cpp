@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 #include <psapi.h>
+#include <shlobj.h> // Masaüstü yolunu dinamik bulmak için gerekli
 
-// Güvenli Bellek Okuma Makrosu (Çökmeleri ve okunmama hatalarını önler)
 #define SAFE_READ(addr, type, default_val) \
     ([](uintptr_t a) -> type { \
         type val = default_val; \
@@ -42,7 +42,6 @@ uintptr_t BaseAddress = 0;
 uintptr_t FNamePoolAddr = 0;
 TUObjectArray* GObjectArray = nullptr;
 
-// Çoklu Sürüm Uyumlu Gelişmiş Tarayıcı
 uintptr_t FindPattern(const char* pattern, const char* mask) {
     MODULEINFO modInfo = { 0 };
     GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(NULL), &modInfo, sizeof(modInfo));
@@ -81,10 +80,7 @@ std::string GetObjectName(void* UObject) {
 void InitializeDumper() {
     BaseAddress = (uintptr_t)GetModuleHandleA(NULL);
 
-    // 1. Sürüm İmza Havuzu (UE 4.25 - 4.27 Evrensel Çekirdek Yapısı)
     uintptr_t GObjectSig = FindPattern("\x48\x8B\x05\x00\x00\x00\x00\x4B\x8D\x0C\x40\x48\x8B\x01", "xxx????xxxxxxx");
-    
-    // 2. Sürüm Yedek İmza (Eğer ana imza derleyici tarafından değiştirildiyse devreye girer)
     if (!GObjectSig) {
         GObjectSig = FindPattern("\x48\x8D\x0D\x00\x00\x00\x00\xE8\x00\x00\x00\x00\x48\x8B\x8D", "xxx????x????xxx");
     }
@@ -93,28 +89,29 @@ void InitializeDumper() {
         int32_t Offset = SAFE_READ(GObjectSig + 3, int32_t, 0);
         GObjectArray = (TUObjectArray*)(GObjectSig + 7 + Offset);
     } else {
-        // Son Çare: Bilinen en kararlı statik ofset adresi (Sürüm uyuşmazlığında sıfırlanmayı önler)
         GObjectArray = (TUObjectArray*)(BaseAddress + 0x41E9D50);
     }
 
-    // FNamePool Konumunu Dinamik Olarak Doğrula
     FNamePoolAddr = (uintptr_t)GObjectArray - 0x2C4A0;
 }
 
 DWORD WINAPI DumperThread(LPVOID lpParam) {
     InitializeDumper();
 
-    std::ofstream dump("C:\\ProSoccerSDK.txt");
+    // Masaüstü yolunu dinamik alıyoruz
+    char desktopPath[MAX_PATH];
+    SHGetFolderPathA(NULL, CSIDL_DESKTOP, NULL, 0, desktopPath);
+    std::string fullPath = std::string(desktopPath) + "\\ProSoccerSDK.txt";
+
+    std::ofstream dump(fullPath);
     if (!dump.is_open()) {
-        MessageBoxA(NULL, "Dosya olusturulamadi! Yonetici olarak calistirin.", "Hata", MB_OK | MB_ICONERROR);
+        MessageBoxA(NULL, "Masaustunde dosya olusturulamadi!", "Hata", MB_OK | MB_ICONERROR);
         return 0;
     }
 
-    // Geçerlilik Kontrolü (GObjectArray okunmadı hatasını burada yakalıyoruz)
     int32_t ElementsCount = SAFE_READ((uintptr_t)&GObjectArray->NumElements, int32_t, 0);
     if (ElementsCount <= 0 || ElementsCount > 500000) {
         dump << "[HATA] GObjectArray bellekten okunamadi veya adres gecersiz!\n";
-        dump << "Elde edilen GObjectArray Adresi: " << std::hex << GObjectArray << "\n";
         dump.close();
         MessageBoxA(NULL, "GObjectArray okunamadi! Oyun surumu uyumsuz veya koruma aktif.", "Hata", MB_OK | MB_ICONERROR);
         return 0;
@@ -139,7 +136,7 @@ DWORD WINAPI DumperThread(LPVOID lpParam) {
     }
 
     dump.close();
-    MessageBoxA(NULL, "SDK basariyla C:\\ProSoccerSDK.txt dosyasına yazildi!", "Basarili", MB_OK | MB_ICONINFORMATION);
+    MessageBoxA(NULL, "SDK basariyla Masaustune ProSoccerSDK.txt olarak yazildi!", "Basarili", MB_OK | MB_ICONINFORMATION);
     return 0;
 }
 
@@ -150,4 +147,3 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     }
     return TRUE;
 }
-
