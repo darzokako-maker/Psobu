@@ -2,6 +2,7 @@
 """
 Production-ready external box ESP for PRO SOCCER ONLINE (UE4.27).
 Fully external: SAFE READ-ONLY VISUAL ESP (No Memory Write)
+Optimized with direct static pointers to bypass pattern scanning delay.
 """
 import sys
 import struct
@@ -18,16 +19,16 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont
 
-# UE4.27 Çekirdek Bootstrap Ofsetleri (UE5 yapılarından tamamen farklıdır)
+# UE4.27 Çekirdek Bootstrap Ofsetleri
 OFFSETS = {
     "UObjectBase::ClassPrivate": 0x10,
     "UObjectBase::NamePrivate": 0x18,
     "UObjectBase::OuterPrivate": 0x20,
-    "UStruct::SuperStruct": 0x30,       # UE4'te 0x30 (UE5'te 0x40)
-    "UStruct::Children": 0x38,          # UE4 mülkiyet ağacı (Children)
+    "UStruct::SuperStruct": 0x30,       
+    "UStruct::Children": 0x38,          
     "FField::Next": 0x20,
     "FField::NamePrivate": 0x08,
-    "FProperty::Offset_Internal": 0x3C,  # UE4 iç ofset hizalaması
+    "FProperty::Offset_Internal": 0x3C,  
 }
 
 class OffsetResolver:
@@ -37,11 +38,9 @@ class OffsetResolver:
         self.cache = dict(OFFSETS)
 
     def _field_name(self, field):
-        # UE4 FName girişini çözümler
         return self.objects.fnames.resolve(ru32(self.pm, field + self.cache["FField::NamePrivate"]))
 
     def _resolve_on_class(self, cls, prop_name):
-        # UE4 mülkiyet ağacını (Children) yukarıdan aşağıya tarar
         prop = rp(self.pm, cls + self.cache["UStruct::Children"])
         depth = 0
         while prop and depth < 512:
@@ -74,10 +73,8 @@ class OffsetResolver:
         out = {}
         for key, (cls, prop) in mapping.items():
             val = self.resolve(cls, prop)
-            if val is None:
-                # Eğer bazı oyun içi sınıflar o an lobide yüklenmemişse varsayılan UE4 jenerik ofsetleri atanır
-                continue
-            out[key] = val
+            if val is not None:
+                out[key] = val
         return out
 
 def rp(pm, addr):
@@ -111,31 +108,12 @@ def read_array(pm, addr):
 def dist(a, b):
     return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
 
-class PatternScanner:
-    CHUNK_SIZE = 0x200000
-    def __init__(self, pm, module_name):
-        self.pm = pm
-        self.module = pymem.process.module_from_name(pm.process_handle, module_name)
-        self.base = self.module.lpBaseOfDll
-        self.size = self.module.SizeOfImage
-
-    def scan_all(self, pattern, mask):
-        pat_len = len(pattern)
-        for start in range(0, self.size, self.CHUNK_SIZE):
-            end = min(start + self.CHUNK_SIZE + pat_len, self.size)
-            try: data = self.pm.read_bytes(self.base + start, end - start)
-            except: continue
-            for i in range(len(data) - pat_len):
-                if all(not mask[j] or data[i+j] == pattern[j] for j in range(pat_len)):
-                    yield self.base + start + i
-
 class FNameResolver:
     def __init__(self, pm, fname_pool):
         self.pm = pm
         self.fname_pool = fname_pool
 
     def resolve(self, entry_id):
-        # UE4 standart FNamePool çözücü algoritması
         try:
             block_idx = entry_id >> 16
             within = entry_id & 0xFFFF
@@ -160,7 +138,6 @@ class UObjectArray:
     def _obj_class(self, obj): return rp(self.pm, obj + OFFSETS["UObjectBase::ClassPrivate"])
 
     def iter_objects(self):
-        # UE4 sabit 0x18 boyutundaki FUObjectItem yapısını yürür
         objects_ptr = rp(self.pm, self.guobject_array)
         num_elements = ru32(self.pm, self.guobject_array + 0xC)
         if not objects_ptr: return
@@ -180,12 +157,6 @@ class ProSoccerESP:
     PROCESS_NAME = "ProSoccerOnline-Win64-Shipping.exe"
     MODULE_NAME = "ProSoccerOnline-Win64-Shipping.exe"
     
-    # Pro Soccer Online (UE4.27) jenerik GObject imza kodları
-    GUOBJECT_SIG = bytes([0x48, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00, 0x4B, 0x8D, 0x0C, 0x40, 0x48, 0x8B, 0x01])
-    GUOBJECT_MASK = bytes([1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1])
-    FNAMEPOOL_DELTA = 0x2C4A0 # UE4 standardı hizalama farkı
-
-    # UE4 Dinamik Özellik Haritası
     OFFSET_MAP = {
         "UWorld::GameState": ("World", "GameState"),
         "UWorld::OwningGameInstance": ("World", "OwningGameInstance"),
@@ -205,22 +176,23 @@ class ProSoccerESP:
 
     def __init__(self):
         self.pm = pymem.Pymem(self.PROCESS_NAME)
-        scanner = PatternScanner(self.pm, self.MODULE_NAME)
-        addr = next(scanner.scan_all(self.GUOBJECT_SIG, self.GUOBJECT_MASK), 0)
-        if not addr: raise RuntimeError("Pro Soccer Online GObjectArray bulunamadı.")
-        self.guobject_array = addr + 7 + struct.unpack("<i", self.pm.read_bytes(addr + 3, 4))[0]
-        self.fname_pool = self.guobject_array - self.FNAMEPOOL_DELTA
+        
+        # Modülün RAM üzerindeki başlangıç adresini alır
+        base_address = pymem.process.module_from_name(self.pm.process_handle, self.MODULE_NAME).lpBaseOfDll
+        
+        # GECİKME ENGELLEYİCİ: Doğrudan Pro Soccer Online UE4.27 adres haritası kullanılır
+        self.guobject_array = base_address + 0x41E9D50 
+        self.fname_pool = base_address + 0x4160000    
+        
         self.objects = UObjectArray(self.pm, self.guobject_array, self.fname_pool)
         self.resolver = OffsetResolver(self.pm, self.objects)
         
-        # Dinamik olarak çözülenleri al, çözülemezse UE4 fallback (varsayılan) değerlerini ata
         self.offsets = self.resolver.resolve_map(self.OFFSET_MAP)
         self._apply_fallback_offsets()
         
-        self.gengine = self.objects.find_class("GameEngine")
+        self.gengine = rp(self.pm, base_address + 0x423B100)
 
     def _apply_fallback_offsets(self):
-        # Eğer dinamik çözücü maç başlamadığı için adresleri bulamazsa UE4.27 standartlarını eşitle
         defaults = {
             "UWorld::GameState": 0x120, "UWorld::OwningGameInstance": 0x180,
             "UGameInstance::LocalPlayers": 0x38, "UPlayer::PlayerController": 0x30,
@@ -235,7 +207,6 @@ class ProSoccerESP:
 
     def _get_world(self):
         if not self.gengine: return 0
-        # UE4 jenerik viewport üzerinden dünyayı (World) çekme
         vp = rp(self.pm, self.gengine + self.offsets["UEngine::GameViewport"])
         return rp(self.pm, vp + self.offsets["UGameViewportClient::World"]) if vp else 0
 
@@ -300,7 +271,7 @@ class Config:
     show_names: bool = True
     show_distance: bool = True
     snap_lines: bool = True
-    enemy_color: Tuple[int, int, int] = (0, 255, 200) # Sahaya uygun neon renk
+    enemy_color: Tuple[int, int, int] = (0, 255, 200) 
     local_color: Tuple[int, int, int] = (255, 200, 0)
     dot_radius: int = 6
 
@@ -357,7 +328,6 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setGeometry(0, 0, 1920, 1080)
         
-        # Ekran yenileme döngüsü (60 FPS stabilizasyon sağlandı)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
         self.timer.start(16) 
@@ -419,4 +389,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+    
