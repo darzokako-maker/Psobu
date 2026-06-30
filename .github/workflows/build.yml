@@ -1,0 +1,40 @@
+name: Build Pro Soccer ESP EXE
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Manuel tetikleme butonunu aktif eder
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        # requirements.txt aramasını ve cache hatalarını engellemek için cache kullanılmıyor
+
+    - name: Install Dependencies Directly
+      run: |
+        python -m pip install --upgrade pip
+        # Kütüphaneleri harici dosya olmadan doğrudan pip ile yüklüyoruz
+        pip install pymem PyQt5 pyinstaller
+
+    - name: Build Pro Soccer ESP with PyInstaller
+      run: |
+        # Kodun siyah konsol ekranı açmadan, yönetici yetkisiyle (UAC) ve tek parça derlenmesini sağlar
+        pyinstaller --onefile --noconsole --uac-admin --name="ProSoccer_Pure_ESP" pro_soccer_esp.py
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Pro-Soccer-ESP-Executable
+        path: dist/ProSoccer_Pure_ESP.exe
+        if-no-files-found: error
+        retention-days: 5
+        
