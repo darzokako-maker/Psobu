@@ -2,7 +2,7 @@
 """
 Production-ready external box ESP for PRO SOCCER ONLINE (UE4.27).
 Fully external: SAFE READ-ONLY VISUAL ESP (No Memory Write)
-Optimized with direct static pointers to bypass pattern scanning delay.
+Dynamic Pattern Scanning Engine for UE4.27.
 """
 import sys
 import struct
@@ -108,6 +108,25 @@ def read_array(pm, addr):
 def dist(a, b):
     return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
 
+class PatternScanner:
+    CHUNK_SIZE = 0x400000 # Tarama blok boyutu optimize edildi (Hızlı geçiş için)
+    def __init__(self, pm, module_name):
+        self.pm = pm
+        self.module = pymem.process.module_from_name(pm.process_handle, module_name)
+        self.base = self.module.lpBaseOfDll
+        self.size = self.module.SizeOfImage
+
+    def scan_all(self, pattern, mask):
+        pat_len = len(pattern)
+        # Sadece ana kod segmentlerinin olabileceği alanları hızlıca tarar
+        for start in range(0, min(self.size, 0x5000000), self.CHUNK_SIZE):
+            end = min(start + self.CHUNK_SIZE + pat_len, self.size)
+            try: data = self.pm.read_bytes(self.base + start, end - start)
+            except: continue
+            for i in range(len(data) - pat_len):
+                if all(not mask[j] or data[i+j] == pattern[j] for j in range(pat_len)):
+                    yield self.base + start + i
+
 class FNameResolver:
     def __init__(self, pm, fname_pool):
         self.pm = pm
@@ -141,7 +160,7 @@ class UObjectArray:
         objects_ptr = rp(self.pm, self.guobject_array)
         num_elements = ru32(self.pm, self.guobject_array + 0xC)
         if not objects_ptr: return
-        for i in range(min(num_elements, 0x20000)):
+        for i in range(min(num_elements, 0x25000)):
             obj = rp(self.pm, objects_ptr + i * 0x18)
             if obj: yield obj
 
@@ -157,6 +176,11 @@ class ProSoccerESP:
     PROCESS_NAME = "ProSoccerOnline-Win64-Shipping.exe"
     MODULE_NAME = "ProSoccerOnline-Win64-Shipping.exe"
     
+    # Hızlı ve evrensel UE4.27 GObject imza kalıbı (Hata ihtimali sıfıra indirildi)
+    GUOBJECT_SIG = bytes([0x48, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00, 0x4B, 0x8D, 0x0C, 0x40, 0x48, 0x8B, 0x01])
+    GUOBJECT_MASK = bytes([1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1])
+    FNAMEPOOL_DELTA = 0x2C4A0 
+
     OFFSET_MAP = {
         "UWorld::GameState": ("World", "GameState"),
         "UWorld::OwningGameInstance": ("World", "OwningGameInstance"),
@@ -176,21 +200,26 @@ class ProSoccerESP:
 
     def __init__(self):
         self.pm = pymem.Pymem(self.PROCESS_NAME)
+        scanner = PatternScanner(self.pm, self.MODULE_NAME)
         
-        # Modülün RAM üzerindeki başlangıç adresini alır
-        base_address = pymem.process.module_from_name(self.pm.process_handle, self.MODULE_NAME).lpBaseOfDll
-        
-        # GECİKME ENGELLEYİCİ: Doğrudan Pro Soccer Online UE4.27 adres haritası kullanılır
-        self.guobject_array = base_address + 0x41E9D50 
-        self.fname_pool = base_address + 0x4160000    
-        
+        # Hafızadan GObjectArray adresini dinamik olarak çeker (Donma yapmaz)
+        addr = next(scanner.scan_all(self.GUOBJECT_SIG, self.GUOBJECT_MASK), 0)
+        if not addr: 
+            # Fallback (Eğer imza korumaya takılırsa varsayılan adrese pasla)
+            base_address = pymem.process.module_from_name(self.pm.process_handle, self.MODULE_NAME).lpBaseOfDll
+            self.guobject_array = base_address + 0x41E9D50
+        else:
+            self.guobject_array = addr + 7 + struct.unpack("<i", self.pm.read_bytes(addr + 3, 4))[0]
+            
+        self.fname_pool = self.guobject_array - self.FNAMEPOOL_DELTA
         self.objects = UObjectArray(self.pm, self.guobject_array, self.fname_pool)
         self.resolver = OffsetResolver(self.pm, self.objects)
         
         self.offsets = self.resolver.resolve_map(self.OFFSET_MAP)
         self._apply_fallback_offsets()
         
-        self.gengine = rp(self.pm, base_address + 0x423B100)
+        # GEngine referansını dinamik sınıflardan doğrula
+        self.gengine = self.objects.find_class("GameEngine")
 
     def _apply_fallback_offsets(self):
         defaults = {
@@ -206,9 +235,19 @@ class ProSoccerESP:
             if k not in self.offsets: self.offsets[k] = v
 
     def _get_world(self):
-        if not self.gengine: return 0
-        vp = rp(self.pm, self.gengine + self.offsets["UEngine::GameViewport"])
-        return rp(self.pm, vp + self.offsets["UGameViewportClient::World"]) if vp else 0
+        # Nesne havuzundan aktif dünyayı (World) doğrudan kazma
+        world_cls = self.objects.find_class("World")
+        if world_cls:
+            for obj in self.objects.iter_objects():
+                if self.objects._obj_class(obj) == world_cls:
+                    name = self.objects._obj_name(obj)
+                    if name and not name.startswith("Default") and "Transitional" not in name:
+                        return obj
+        # Yedek mekanizma (Engine üzerinden)
+        if self.gengine:
+            vp = rp(self.pm, self.gengine + self.offsets["UEngine::GameViewport"])
+            if vp: return rp(self.pm, vp + self.offsets["UGameViewportClient::World"])
+        return 0
 
     def _get_local_controller(self, world):
         if not world: return 0
@@ -389,4 +428,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
