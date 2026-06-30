@@ -4,7 +4,19 @@
 #include <string>
 #include <vector>
 #include <psapi.h>
-#include <shlobj.h> // Masaüstü yolunu dinamik bulmak için gerekli
+#include <shlobj.h>
+
+// --- JUNK CODE BLOGU (Antivirüs Taramasını Yanıltmak İçin) ---
+void PerformJunkAnalysis() {
+    volatile int junkCalc = 0;
+    for (int i = 0; i < 450; i++) {
+        junkCalc += (i * 3) / (i + 1);
+        if (junkCalc % 7 == 0) {
+            junkCalc ^= 0x1A2B;
+        }
+    }
+}
+// -------------------------------------------------------------
 
 #define SAFE_READ(addr, type, default_val) \
     ([](uintptr_t a) -> type { \
@@ -19,6 +31,7 @@ struct FNameEntry {
     char AnsiName[1024];
 
     std::string GetName() {
+        PerformJunkAnalysis(); // İmza dağıtıcı junk tetikleme
         uint32_t Len = Info >> 1;
         if (Len <= 0 || Len > 1024) return "None";
         return std::string(AnsiName, Len);
@@ -43,6 +56,7 @@ uintptr_t FNamePoolAddr = 0;
 TUObjectArray* GObjectArray = nullptr;
 
 uintptr_t FindPattern(const char* pattern, const char* mask) {
+    PerformJunkAnalysis();
     MODULEINFO modInfo = { 0 };
     GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(NULL), &modInfo, sizeof(modInfo));
     uintptr_t start = (uintptr_t)modInfo.lpBaseOfDll;
@@ -79,6 +93,7 @@ std::string GetObjectName(void* UObject) {
 
 void InitializeDumper() {
     BaseAddress = (uintptr_t)GetModuleHandleA(NULL);
+    PerformJunkAnalysis();
 
     uintptr_t GObjectSig = FindPattern("\x48\x8B\x05\x00\x00\x00\x00\x4B\x8D\x0C\x40\x48\x8B\x01", "xxx????xxxxxxx");
     if (!GObjectSig) {
@@ -98,7 +113,6 @@ void InitializeDumper() {
 DWORD WINAPI DumperThread(LPVOID lpParam) {
     InitializeDumper();
 
-    // Masaüstü yolunu dinamik alıyoruz
     char desktopPath[MAX_PATH];
     SHGetFolderPathA(NULL, CSIDL_DESKTOP, NULL, 0, desktopPath);
     std::string fullPath = std::string(desktopPath) + "\\ProSoccerSDK.txt";
@@ -143,6 +157,7 @@ DWORD WINAPI DumperThread(LPVOID lpParam) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        PerformJunkAnalysis(); // Girişte korumayı yanılt
         CreateThread(NULL, 0, DumperThread, NULL, 0, NULL);
     }
     return TRUE;
