@@ -6,18 +6,16 @@
 #include <psapi.h>
 #include <shlobj.h>
 
-// --- JUNK CODE BLOGU (Antivirüs Taramasını Yanıltmak İçin) ---
+// Antivirüs motorlarını yanıltmak ve imzayı bozmak için junk döngüsü
 void PerformJunkAnalysis() {
     volatile int junkCalc = 0;
-    for (int i = 0; i < 450; i++) {
-        junkCalc += (i * 3) / (i + 1);
-        if (junkCalc % 7 == 0) {
-            junkCalc ^= 0x1A2B;
-        }
+    for (int i = 0; i < 300; i++) {
+        junkCalc += (i * 2) / (i + 1);
+        if (junkCalc % 5 == 0) junkCalc ^= 0x3F;
     }
 }
-// -------------------------------------------------------------
 
+// Çökmeleri engelleyen en üst düzey Güvenli Okuma Makrosu
 #define SAFE_READ(addr, type, default_val) \
     ([](uintptr_t a) -> type { \
         type val = default_val; \
@@ -31,7 +29,6 @@ struct FNameEntry {
     char AnsiName[1024];
 
     std::string GetName() {
-        PerformJunkAnalysis(); // İmza dağıtıcı junk tetikleme
         uint32_t Len = Info >> 1;
         if (Len <= 0 || Len > 1024) return "None";
         return std::string(AnsiName, Len);
@@ -55,8 +52,8 @@ uintptr_t BaseAddress = 0;
 uintptr_t FNamePoolAddr = 0;
 TUObjectArray* GObjectArray = nullptr;
 
-uintptr_t FindPattern(const char* pattern, const char* mask) {
-    PerformJunkAnalysis();
+// Dumper-7 kalitesinde byte tarayıcı
+uintptr_t FindPattern(const unsigned char* pattern, const char* mask) {
     MODULEINFO modInfo = { 0 };
     GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(NULL), &modInfo, sizeof(modInfo));
     uintptr_t start = (uintptr_t)modInfo.lpBaseOfDll;
@@ -66,7 +63,7 @@ uintptr_t FindPattern(const char* pattern, const char* mask) {
     for (uintptr_t i = 0; i < size - patternLen; i++) {
         bool found = true;
         for (size_t j = 0; j < patternLen; j++) {
-            if (mask[j] != '?' && pattern[j] != *(char*)(start + i + j)) {
+            if (mask[j] != '?' && pattern[j] != *(unsigned char*)(start + i + j)) {
                 found = false;
                 break;
             }
@@ -91,28 +88,11 @@ std::string GetObjectName(void* UObject) {
     return Entry->GetName();
 }
 
-void InitializeDumper() {
-    BaseAddress = (uintptr_t)GetModuleHandleA(NULL);
-    PerformJunkAnalysis();
-
-    uintptr_t GObjectSig = FindPattern("\x48\x8B\x05\x00\x00\x00\x00\x4B\x8D\x0C\x40\x48\x8B\x01", "xxx????xxxxxxx");
-    if (!GObjectSig) {
-        GObjectSig = FindPattern("\x48\x8D\x0D\x00\x00\x00\x00\xE8\x00\x00\x00\x00\x48\x8B\x8D", "xxx????x????xxx");
-    }
-
-    if (GObjectSig) {
-        int32_t Offset = SAFE_READ(GObjectSig + 3, int32_t, 0);
-        GObjectArray = (TUObjectArray*)(GObjectSig + 7 + Offset);
-    } else {
-        GObjectArray = (TUObjectArray*)(BaseAddress + 0x41E9D50);
-    }
-
-    FNamePoolAddr = (uintptr_t)GObjectArray - 0x2C4A0;
-}
-
 DWORD WINAPI DumperThread(LPVOID lpParam) {
-    InitializeDumper();
+    PerformJunkAnalysis();
+    BaseAddress = (uintptr_t)GetModuleHandleA(NULL);
 
+    // Çıktı klasörünü masaüstü yapıyoruz (UAC/Yönetici İzni Engeli Olmaz)
     char desktopPath[MAX_PATH];
     SHGetFolderPathA(NULL, CSIDL_DESKTOP, NULL, 0, desktopPath);
     std::string fullPath = std::string(desktopPath) + "\\ProSoccerSDK.txt";
@@ -123,17 +103,45 @@ DWORD WINAPI DumperThread(LPVOID lpParam) {
         return 0;
     }
 
+    dump << "==================================================\n";
+    dump << "         NOVA POWERFUL DYNAMIC SDK DUMPER         \n";
+    dump << "==================================================\n";
+    dump << "Base Address: 0x" << std::hex << BaseAddress << "\n";
+
+    // UE4.27 Evrensel GObjectArray İmzası (Dumper-7 Altyapısı)
+    const unsigned char GObjPattern[] = { 0x48, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00, 0x4B, 0x8D, 0x0C, 0x40, 0x48, 0x8B, 0x01 };
+    const char* GObjMask = "xxx????xxxxxxx";
+
+    uintptr_t GObjectSig = FindPattern(GObjPattern, GObjMask);
+    
+    if (GObjectSig) {
+        int32_t Offset = SAFE_READ(GObjectSig + 3, int32_t, 0);
+        GObjectArray = (TUObjectArray*)(GObjectSig + 7 + Offset);
+        dump << "GObjectArray Durumu: DINAMIK IMZA ILE BULUNDU -> 0x" << std::hex << (uintptr_t)GObjectArray << "\n";
+    } else {
+        // İmza patlarsa hardcoded yedek devreye girer
+        GObjectArray = (TUObjectArray*)(BaseAddress + 0x41E9D50);
+        dump << "GObjectArray Durumu: IMZA BULUNAMADI! YEDEK STATIK OFSET DENENIYOR -> 0x" << std::hex << (uintptr_t)GObjectArray << "\n";
+    }
+
+    // FNamePool konumunu çöz
+    FNamePoolAddr = (uintptr_t)GObjectArray - 0x2C4A0;
+    dump << "FNamePool Adresi: 0x" << std::hex << FNamePoolAddr << "\n";
+
+    // Eleman sayısını doğrula
     int32_t ElementsCount = SAFE_READ((uintptr_t)&GObjectArray->NumElements, int32_t, 0);
+    dump << "NumElements (Nesne Sayisi): " << std::dec << ElementsCount << "\n";
+    dump << "==================================================\n\n";
+
     if (ElementsCount <= 0 || ElementsCount > 500000) {
-        dump << "[HATA] GObjectArray bellekten okunamadi veya adres gecersiz!\n";
+        dump << "[KRITIK HATA] Nesne sayisi gecersiz veya bellek korumali!\n";
+        dump << "Lütfen bu log dosyasini kontrol edin.\n";
         dump.close();
-        MessageBoxA(NULL, "GObjectArray okunamadi! Oyun surumu uyumsuz veya koruma aktif.", "Hata", MB_OK | MB_ICONERROR);
+        MessageBoxA(NULL, "Bellek okuma hatasi! Detaylar masaustundeki .txt icinde.", "Hata", MB_OK | MB_ICONERROR);
         return 0;
     }
 
-    dump << "--- PRO SOCCER ONLINE DYNAMIC SDK DUMP ---\n";
-    dump << "NumElements: " << std::dec << ElementsCount << "\n\n";
-
+    // Listeyi taramaya başla
     uintptr_t ObjectsList = SAFE_READ((uintptr_t)&GObjectArray->Objects, uintptr_t, 0);
     if (ObjectsList) {
         for (int32_t i = 0; i < ElementsCount; ++i) {
@@ -150,14 +158,14 @@ DWORD WINAPI DumperThread(LPVOID lpParam) {
     }
 
     dump.close();
-    MessageBoxA(NULL, "SDK basariyla Masaustune ProSoccerSDK.txt olarak yazildi!", "Basarili", MB_OK | MB_ICONINFORMATION);
+    MessageBoxA(NULL, "SDK Basariyla Söküldü ve Masaustune Kaydedildi!", "Basarili", MB_OK | MB_ICONINFORMATION);
     return 0;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        PerformJunkAnalysis(); // Girişte korumayı yanılt
+        PerformJunkAnalysis();
         CreateThread(NULL, 0, DumperThread, NULL, 0, NULL);
     }
     return TRUE;
