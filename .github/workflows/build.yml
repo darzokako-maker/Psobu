@@ -1,35 +1,268 @@
-name: Build Nova SDK Dumper DLL
+name: Build Pro Soccer Online Dumper DLL
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
+    paths:
+      - '**.cpp'
+      - '**.h'
+      - '**.hpp'
+      - '.github/workflows/*.yml'
   pull_request:
-    branches: [ "main" ]
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_config:
+        description: 'Build Configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+      obfuscate:
+        description: 'Enable code obfuscation'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  SOLUTION_NAME: PSO_Dumper
+  DLL_NAME: PSO_Dumper
+  BUILD_CONFIG: ${{ github.event.inputs.build_config || 'Release' }}
 
 jobs:
-  build:
+  build-x64:
+    name: Build x64 DLL
     runs-on: windows-2022
-
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64]
+        configuration: [Release, Debug]
+    
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-    - name: Setup MSVC
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      with:
+        msbuild-architecture: x64
+
+    - name: Setup Visual Studio Environment
       uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: amd64
 
-    - name: Configure CMake
-      # /O2: Hız ve optimizasyon, /Oi: intrinsic fonksiyonlar (AV imzasını bozar)
-      # /Ot: Hız için kod boyutu, /MT: Statik kütüphane bağlama
+    - name: Create Project Structure
+      shell: cmd
       run: |
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        mkdir build
+        mkdir output
+        mkdir artifacts
+
+    - name: Generate Version Info
+      shell: powershell
+      run: |
+        $version = Get-Date -Format "yyyy.MM.dd.HHmm"
+        $commitHash = git rev-parse --short HEAD
+        echo "BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "COMMIT_HASH=$commitHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "BUILD_DATE=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Compile DLL (Direct Compilation)
+      shell: cmd
+      run: |
+        echo Building %BUILD_CONFIG% %{{ matrix.platform }}...
         
-    - name: Build DLL with CMake
-      run: |
-        cmake --build build --config Release -- /p:CL_CXXFlags="/O2 /Oi /Ot /MT /D_USRDLL /D_WINDLL"
+        cl.exe ^
+          /nologo ^
+          /LD ^
+          /EHsc ^
+          /std:c++17 ^
+          /O2 ^
+          /GS- ^
+          /GL ^
+          /MT ^
+          /DNDEBUG ^
+          /DUNICODE ^
+          /D_UNICODE ^
+          /DBUILD_VERSION="%BUILD_VERSION%" ^
+          /DBUILD_DATE="%BUILD_DATE%" ^
+          /DCOMMIT_HASH="%COMMIT_HASH%" ^
+          /Fe:output/%DLL_NAME%.dll ^
+          /Fo:build/ ^
+          /Fd:build/%DLL_NAME%.pdb ^
+          main.cpp ^
+          /link ^
+          /OPT:REF ^
+          /OPT:ICF ^
+          /LTCG ^
+          /DYNAMICBASE ^
+          /NXCOMPAT ^
+          /MACHINE:X64 ^
+          psapi.lib ^
+          shell32.lib ^
+          user32.lib ^
+          kernel32.lib ^
+          advapi32.lib
 
-    - name: Upload Compiled DLL Artifact
+    - name: Verify DLL
+      shell: powershell
+      run: |
+        if (Test-Path "output/${{ env.DLL_NAME }}.dll") {
+          $fileInfo = Get-Item "output/${{ env.DLL_NAME }}.dll"
+          $sizeKB = [math]::Round($fileInfo.Length / 1KB, 2)
+          Write-Host "✅ DLL Build Successful!"
+          Write-Host "   Size: $sizeKB KB"
+          Write-Host "   Path: $($fileInfo.FullName)"
+          
+          # DLL export kontrolü
+          dumpbin /EXPORTS "output/${{ env.DLL_NAME }}.dll" | Select-String "DllMain"
+        } else {
+          Write-Host "❌ DLL Build Failed!"
+          exit 1
+        }
+
+    - name: Obfuscate DLL (Optional)
+      if: github.event.inputs.obfuscate == 'true'
+      shell: powershell
+      run: |
+        Write-Host "🔒 Applying obfuscation..."
+        # Buraya obfuscator eklenebilir (örn: ConfuserEx, Obfuscar)
+        # Şimdilik sadece kopyalama yapıyoruz
+        Copy-Item "output/${{ env.DLL_NAME }}.dll" "output/${{ env.DLL_NAME }}_obfuscated.dll"
+
+    - name: Create Release Package
+      shell: powershell
+      run: |
+        # README oluştur
+        @"
+        # Pro Soccer Online Dumper DLL
+        ## Build Information
+        - **Version:** ${{ env.BUILD_VERSION }}
+        - **Commit:** ${{ env.COMMIT_HASH }}
+        - **Build Date:** ${{ env.BUILD_DATE }}
+        - **Configuration:** ${{ matrix.configuration }}
+        - **Platform:** ${{ matrix.platform }}
+        
+        ## Usage
+        1. Inject DLL into Pro Soccer Online process
+        2. Dump file will be created on Desktop
+        3. Check Desktop for PSO_Dump_*.txt
+        
+        ## Disclaimer
+        This tool is for educational purposes only.
+        Use at your own risk.
+        "@ | Out-File -FilePath "output/README.md" -Encoding UTF8
+
+        # ZIP oluştur
+        Compress-Archive -Path "output/*" -DestinationPath "artifacts/${{ env.DLL_NAME }}_${{ env.BUILD_VERSION }}_${{ matrix.configuration }}.zip" -Force
+
+    - name: Upload DLL Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NovaDumper-x64
-        path: build/Release/NovaDumper.dll
-        
+        name: ${{ env.DLL_NAME }}_${{ matrix.configuration }}_${{ matrix.platform }}_${{ env.BUILD_VERSION }}
+        path: |
+          output/${{ env.DLL_NAME }}.dll
+          output/${{ env.DLL_NAME }}.pdb
+          output/README.md
+        compression-level: 9
+        retention-days: 90
+
+    - name: Upload Release Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.DLL_NAME }}_Package_${{ matrix.configuration }}_${{ env.BUILD_VERSION }}
+        path: artifacts/*.zip
+        retention-days: 90
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-x64
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: all-artifacts
+        pattern: PSO_Dumper_Package_*
+        merge-multiple: true
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "PSO Dumper - Build ${{ env.BUILD_VERSION }}"
+        tag_name: "v${{ env.BUILD_VERSION }}"
+        body: |
+          ## 🎮 Pro Soccer Online Dumper DLL
+          
+          ### Build Information
+          - **Version:** ${{ env.BUILD_VERSION }}
+          - **Commit:** ${{ env.COMMIT_HASH }}
+          - **Build Date:** ${{ env.BUILD_DATE }}
+          
+          ### Features
+          - ✅ GObjects Dump (3 alternate methods)
+          - ✅ GNames Dump
+          - ✅ Automatic offset scanning
+          - ✅ Exception-safe memory reading
+          - ✅ Desktop TXT output
+          
+          ### Usage
+          1. Download the ZIP file
+          2. Extract DLL
+          3. Inject into ProSoccer.exe
+          4. Check Desktop for dump file
+          
+          ### ⚠️ Warning
+          For educational purposes only. Use at your own risk.
+        draft: false
+        prerelease: false
+        files: |
+          all-artifacts/*.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    name: Send Notification
+    needs: [build-x64, create-release]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Discord Notification
+      if: github.event_name == 'push'
+      uses: sarisia/actions-status-discord@v1
+      with:
+        webhook: ${{ secrets.DISCORD_WEBHOOK }}
+        title: "🔨 PSO Dumper Build Status"
+        description: |
+          **Build:** ${{ needs.build-x64.result }}
+          **Release:** ${{ needs.create-release.result }}
+          **Version:** ${{ env.BUILD_VERSION }}
+        color: ${{ job.status == 'success' && '0x00FF00' || '0xFF0000' }}
+        username: "GitHub Actions"
+        avatar_url: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+
+    - name: Telegram Notification
+      if: github.event_name == 'push'
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ secrets.TELEGRAM_CHAT_ID }}
+        token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        message: |
+          🎮 *PSO Dumper Build Complete*
+          
+          Version: `${{ env.BUILD_VERSION }}`
+          Status: ${{ job.status }}
+          Commit: ${{ env.COMMIT_HASH }}
+          
+          Download from GitHub Releases
+        parse_mode: Markdown
